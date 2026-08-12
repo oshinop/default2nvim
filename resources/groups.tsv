@@ -1,0 +1,41 @@
+# key	label	icon
+template	Templates	html.svg
+terminal	Shell / Terminal	terminal.svg
+document	Documents	book.svg
+json	JSON	code.svg
+cpp	C / C++	cpp.svg
+c	C	c.svg
+settings	Settings / Config	settings.svg
+javascript	JavaScript	javascript.svg
+coffeescript	CoffeeScript	coffeescript.svg
+csharp	C#	file.svg
+csproj	C# Project	file.svg
+css	CSS / Less	css.svg
+storage	Storage (SQL / CSV)	database.svg
+dart	Dart	dart.svg
+diff	Diff / Patch	diff.svg
+docker	Docker	docker.svg
+yaml	YAML	yaml.svg
+fsharp	F#	fsharp.svg
+ruby	Ruby	ruby.svg
+go	Go	go.svg
+html	HTML	html.svg
+ipynb	Jupyter Notebook	jupyter.svg
+java	Java	java.svg
+react	React (JSX / TSX)	react.svg
+log	Log Files	info.svg
+lua	Lua	lua.svg
+code	Code / Misc	code.svg
+markdown	Markdown	book.svg
+ocaml	OCaml	ocaml.svg
+php	PHP	php.svg
+puppet	Puppet	puppet.svg
+python	Python	python.svg
+r	R	r.svg
+rust	Rust	rust.svg
+sass	Sass / SCSS	sass.svg
+image	Images	image.svg
+toml	TOML	toml.svg
+typescript	TypeScript	typescript.svg
+vcs	Version Control	git.svg
+vue	Vue	vue.svg

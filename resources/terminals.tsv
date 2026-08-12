@@ -1,0 +1,7 @@
+# id	display_name	bundle_identifier	fallback_paths
+ghostty	Ghostty	com.mitchellh.ghostty	/Applications/Ghostty.app|~/Applications/Ghostty.app
+wezterm	WezTerm	com.github.wez.wezterm	/Applications/WezTerm.app|~/Applications/WezTerm.app
+kitty	kitty	net.kovidgoyal.kitty	/Applications/kitty.app|~/Applications/kitty.app
+alacritty	Alacritty	org.alacritty	/Applications/Alacritty.app|~/Applications/Alacritty.app
+iterm2	iTerm2	com.googlecode.iterm2	/Applications/iTerm.app|/Applications/iTerm2.app|~/Applications/iTerm.app|~/Applications/iTerm2.app
+terminal	Terminal	com.apple.Terminal	/System/Applications/Utilities/Terminal.app|/Applications/Utilities/Terminal.app
