@@ -103,6 +103,7 @@ done
 
 # Compile the event-aware app and the build-time document icon compositor.
 "$SWIFTC" \
+    -parse-as-library \
     -O \
     -whole-module-optimization \
     -framework AppKit \

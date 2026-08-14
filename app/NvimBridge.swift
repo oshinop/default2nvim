@@ -14,6 +14,57 @@ private struct TerminalConfiguration: Decodable {
     let fallbackPaths: [String]
 }
 
+enum GhosttyLaunchPlan {
+    struct AppleScript {
+        let lines: [String]
+        let arguments: [String]
+    }
+
+    static func coldArguments(
+        workingDirectory: String,
+        command: [String]
+    ) -> [String] {
+        // AppKit treats bare operands after `-e` as files, causing Ghostty to
+        // request permission to execute the command a second time. Keep the
+        // complete command inside one configuration argument instead.
+        return [
+            "--working-directory=\(workingDirectory)",
+            "--quit-after-last-window-closed=true",
+            "--initial-command=shell:\(encodedCommand(command))",
+        ]
+    }
+
+    static func running(
+        bundleIdentifier: String,
+        workingDirectory: String,
+        command: [String]
+    ) -> AppleScript {
+        AppleScript(
+            lines: [
+                "on run argv",
+                "tell application id \"\(bundleIdentifier)\"",
+                "set config to new surface configuration",
+                "set initial working directory of config to item 1 of argv",
+                "set command of config to item 2 of argv",
+                "set wait after command of config to false",
+                "new window with configuration config",
+                "activate",
+                "end tell",
+                "end run",
+            ],
+            arguments: [workingDirectory, encodedCommand(command)]
+        )
+    }
+
+    static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private static func encodedCommand(_ command: [String]) -> String {
+        command.map(shellQuote).joined(separator: " ")
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingURLs: [URL] = []
     private var launchWorkItem: DispatchWorkItem?
@@ -91,11 +142,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         command += ["/bin/zsh", "-l", launcherURL.path] + paths
         switch configuration.id {
         case "ghostty":
-            try launchWithOpen(
-                terminalPath,
-                arguments: ["--working-directory=\(workingDirectory)", "-e"] + command,
-                terminalName: configuration.displayName
-            )
+            if NSRunningApplication.runningApplications(
+                withBundleIdentifier: configuration.bundleIdentifier
+            ).isEmpty {
+                try launchWithOpen(
+                    terminalPath,
+                    arguments: GhosttyLaunchPlan.coldArguments(
+                        workingDirectory: workingDirectory,
+                        command: command
+                    ),
+                    terminalName: configuration.displayName
+                )
+            } else {
+                try launchGhosttyWindow(
+                    bundleIdentifier: configuration.bundleIdentifier,
+                    displayName: configuration.displayName,
+                    workingDirectory: workingDirectory,
+                    command: command
+                )
+            }
         case "kitty":
             try launchWithOpen(
                 terminalPath,
@@ -125,7 +190,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     "end tell",
                     "end run",
                 ],
-                command: shellCommand(workingDirectory: workingDirectory, arguments: command)
+                arguments: [
+                    shellCommand(workingDirectory: workingDirectory, arguments: command)
+                ]
             )
         case "terminal":
             try launchWithAppleScript(
@@ -138,7 +205,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     "end tell",
                     "end run",
                 ],
-                command: shellCommand(workingDirectory: workingDirectory, arguments: command)
+                arguments: [
+                    shellCommand(workingDirectory: workingDirectory, arguments: command)
+                ]
             )
         default:
             throw LaunchFailure(message: "Unsupported terminal backend: \(configuration.id). Run default2nvim wrapper set-term.")
@@ -197,6 +266,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    private func launchGhosttyWindow(
+        bundleIdentifier: String,
+        displayName: String,
+        workingDirectory: String,
+        command: [String]
+    ) throws {
+        let launch = GhosttyLaunchPlan.running(
+            bundleIdentifier: bundleIdentifier,
+            workingDirectory: workingDirectory,
+            command: command
+        )
+        try launchWithAppleScript(
+            application: displayName,
+            scriptLines: launch.lines,
+            arguments: launch.arguments
+        )
+    }
+
+    private func launchWithAppleScript(
+        application: String,
+        scriptLines: [String],
+        arguments scriptArguments: [String]
+    ) throws {
+        var processArguments: [String] = []
+        for line in scriptLines {
+            processArguments += ["-e", line]
+        }
+        processArguments += ["--"] + scriptArguments
+
+        try runProcess(
+            executable: "/usr/bin/osascript",
+            arguments: processArguments,
+            failureDescription: "AppleScript could not launch \(application)"
+        )
+    }
+
+
     private func launchWithOpen(
         _ terminalPath: String,
         arguments: [String],
@@ -235,23 +341,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func launchWithAppleScript(
-        application: String,
-        scriptLines: [String],
-        command: String
-    ) throws {
-        var arguments: [String] = []
-        for line in scriptLines {
-            arguments += ["-e", line]
-        }
-        arguments += ["--", command]
-
-        try runProcess(
-            executable: "/usr/bin/osascript",
-            arguments: arguments,
-            failureDescription: "AppleScript could not launch \(application)"
-        )
-    }
 
     private func runProcess(
         executable: String,
@@ -274,13 +363,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func shellCommand(workingDirectory: String, arguments: [String]) -> String {
-        let quotedCommand = arguments.map(shellQuote).joined(separator: " ")
-        return "cd \(shellQuote(workingDirectory)) && exec \(quotedCommand)"
+        let quotedCommand = arguments.map(GhosttyLaunchPlan.shellQuote).joined(separator: " ")
+        return "cd \(GhosttyLaunchPlan.shellQuote(workingDirectory)) && exec \(quotedCommand)"
     }
 
-    private func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-    }
 
     private func workingDirectory(for paths: [String]) -> String {
         guard let firstPath = paths.first else {
@@ -310,8 +396,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let application = NSApplication.shared
-let delegate = AppDelegate()
-application.delegate = delegate
-application.setActivationPolicy(.prohibited)
-application.run()
+#if !NVIMBRIDGE_TESTING
+@main
+struct NvimBridgeMain {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.prohibited)
+        application.run()
+    }
+}
+#endif

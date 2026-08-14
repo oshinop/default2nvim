@@ -121,6 +121,172 @@ last_backend="$(/usr/libexec/PlistBuddy -c 'Print :5:id' "$app_path/Contents/Res
 assert_equal "ghostty" "$first_backend" "terminal catalog starts with the wrong backend"
 assert_equal "terminal" "$last_backend" "terminal catalog is incomplete"
 
+# Both Ghostty paths must preserve argv: a first instance receives one config
+# argument, while an existing instance receives an AppleScript window request.
+ghostty_plan_source="$temp_root/GhosttyLaunchPlanTests.swift"
+ghostty_plan_test="$temp_root/ghostty-launch-plan-test"
+/bin/cat > "$ghostty_plan_source" <<'SWIFT'
+import Darwin
+import Foundation
+
+@main
+struct GhosttyLaunchPlanTests {
+    static func main() {
+        let workingDirectory = "/tmp/work dir"
+        let command = [
+            "/usr/bin/env",
+            "NVIMBRIDGE_NVIM=/tmp/fake nvim",
+            "/bin/zsh",
+            "-l",
+            "/tmp/launcher's script.zsh",
+            "/tmp/file with spaces.swift",
+        ]
+        let encodedCommand = command
+            .map(GhosttyLaunchPlan.shellQuote)
+            .joined(separator: " ")
+
+        let cold = GhosttyLaunchPlan.coldArguments(
+            workingDirectory: workingDirectory,
+            command: command
+        )
+        guard cold == [
+            "--working-directory=\(workingDirectory)",
+            "--quit-after-last-window-closed=true",
+            "--initial-command=shell:\(encodedCommand)",
+        ], cold.allSatisfy({ $0.hasPrefix("--") }) else {
+            exit(1)
+        }
+
+        let running = GhosttyLaunchPlan.running(
+            bundleIdentifier: "com.mitchellh.ghostty",
+            workingDirectory: workingDirectory,
+            command: command
+        )
+        guard running.arguments == [workingDirectory, encodedCommand],
+              running.lines.contains("tell application id \"com.mitchellh.ghostty\""),
+              running.lines.contains("new window with configuration config") else {
+            exit(1)
+        }
+    }
+}
+SWIFT
+/usr/bin/swiftc -parse-as-library -D NVIMBRIDGE_TESTING -O -framework AppKit \
+    -o "$ghostty_plan_test" "$PROJECT_ROOT/app/NvimBridge.swift" "$ghostty_plan_source"
+"$ghostty_plan_test" || fail "Ghostty warm/cold launch plans are invalid"
+
+# Keep Ghostty's command inside one option. Bare `-e` operands are also treated
+# as files by AppKit and make Ghostty ask to execute /bin/zsh a second time.
+ghostty_test_app="$temp_root/Neovim Prompt Test.app"
+fake_ghostty_app="$temp_root/FakeGhostty.app"
+fake_ghostty_contents="$fake_ghostty_app/Contents"
+fake_ghostty_capture="$temp_root/ghostty-launch-arguments.txt"
+fake_nvim_capture="$temp_root/ghostty-nvim-arguments.txt"
+fake_nvim="$temp_root/fake nvim"
+fake_ghostty_identifier="moe.oshino.nvimbridge.tests.fakeghostty"
+/bin/cp -R "$app_path" "$ghostty_test_app"
+/bin/mkdir -p "$fake_ghostty_contents/MacOS"
+/bin/cat > "$fake_ghostty_contents/Info.plist" <<FAKE_GHOSTTY_PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>FakeGhostty</string>
+    <key>CFBundleIdentifier</key>
+    <string>$fake_ghostty_identifier</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+</dict>
+</plist>
+FAKE_GHOSTTY_PLIST
+/usr/bin/swiftc -O -o "$fake_ghostty_contents/MacOS/FakeGhostty" - <<FAKE_GHOSTTY_SWIFT
+import Darwin
+import Foundation
+
+let arguments = Array(CommandLine.arguments.dropFirst()).filter {
+    !\$0.hasPrefix("-psn_")
+}
+try (arguments.joined(separator: "\\n") + "\\n").write(
+    toFile: "$fake_ghostty_capture",
+    atomically: true,
+    encoding: .utf8
+)
+
+let commandPrefix = "--initial-command=shell:"
+guard let command = arguments.first(where: { \$0.hasPrefix(commandPrefix) }) else {
+    exit(64)
+}
+let process = Process()
+process.executableURL = URL(fileURLWithPath: "/bin/bash")
+let shellCommand = String(command.dropFirst(commandPrefix.count))
+process.arguments = ["--noprofile", "--norc", "-c", "exec -l \(shellCommand)"]
+do {
+    try process.run()
+} catch {
+    exit(71)
+}
+process.waitUntilExit()
+exit(process.terminationStatus)
+FAKE_GHOSTTY_SWIFT
+/bin/cat > "$fake_nvim" <<FAKE_NVIM_GHOSTTY
+#!/bin/zsh
+for argument in "\$@"; do
+    print -r -- "\$argument"
+done > "$fake_nvim_capture"
+FAKE_NVIM_GHOSTTY
+/bin/chmod 755 "$fake_nvim"
+/usr/bin/plutil -lint "$fake_ghostty_contents/Info.plist" >/dev/null
+/usr/bin/codesign --force --sign - "$fake_ghostty_app" >/dev/null 2>&1
+
+ghostty_test_catalog="$ghostty_test_app/Contents/Resources/TerminalBackends.plist"
+/usr/libexec/PlistBuddy -c "Set :0:bundleIdentifier $fake_ghostty_identifier" \
+    "$ghostty_test_catalog"
+/usr/libexec/PlistBuddy -c "Set :0:fallbackPaths:0 $fake_ghostty_app" \
+    "$ghostty_test_catalog"
+/usr/bin/codesign --force --deep --sign - "$ghostty_test_app" >/dev/null 2>&1
+
+prompt_document_dir="$temp_root/prompt files"
+prompt_document="$prompt_document_dir/it's spaced.swift"
+/bin/mkdir -p "$prompt_document_dir"
+: > "$prompt_document"
+NVIMBRIDGE_TERMINAL=ghostty NVIMBRIDGE_NVIM="$fake_nvim" \
+    "$ghostty_test_app/Contents/MacOS/NvimBridge" "$prompt_document"
+for attempt in {1..100}; do
+    [[ -f "$fake_ghostty_capture" && -f "$fake_nvim_capture" ]] && break
+    /bin/sleep 0.05
+done
+[[ -f "$fake_ghostty_capture" ]] || fail "Ghostty test app was not launched"
+[[ -f "$fake_nvim_capture" ]] || fail "Ghostty initial command was not executed"
+
+typeset -a ghostty_arguments
+ghostty_arguments=()
+while IFS= read -r argument; do
+    [[ "$argument" == -psn_* ]] || ghostty_arguments+=("$argument")
+done < "$fake_ghostty_capture"
+assert_equal "3" "${#ghostty_arguments}" "Ghostty received unexpected launch operands"
+[[ "${ghostty_arguments[1]}" == --working-directory=* ]] || \
+    fail "Ghostty did not receive a working directory option"
+ghostty_working_directory="${ghostty_arguments[1]#--working-directory=}"
+[[ "$ghostty_working_directory" -ef "$prompt_document_dir" ]] || \
+    fail "Ghostty received the wrong working directory: $ghostty_working_directory"
+assert_equal "--quit-after-last-window-closed=true" "${ghostty_arguments[2]}" \
+    "Ghostty did not retain -e lifecycle behavior"
+[[ "${ghostty_arguments[3]}" == --initial-command=shell:* ]] || \
+    fail "Ghostty did not receive one encoded initial command"
+for argument in "${ghostty_arguments[@]}"; do
+    [[ "$argument" == --* ]] || fail "Ghostty received bare command operand: $argument"
+done
+
+ghostty_nvim_arguments=("${(@f)$(<"$fake_nvim_capture")}")
+assert_equal "2" "${#ghostty_nvim_arguments}" "Ghostty changed the Neovim argument count"
+assert_equal "--" "${ghostty_nvim_arguments[1]}" "Ghostty launch omitted the option terminator"
+[[ "${ghostty_nvim_arguments[2]}" -ef "$prompt_document" ]] || \
+    fail "Ghostty launch damaged a spaced or quoted path: ${ghostty_nvim_arguments[2]}"
+
 # NVIMBRIDGE_NVIM remains the sole explicit Neovim path override.
 launcher_capture="$temp_root/launcher-arguments.txt"
 fake_nvim="$temp_root/fake-nvim"
