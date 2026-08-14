@@ -54,6 +54,58 @@ assert_equal "$app_path" "$build_output" "build script reported the wrong output
 [[ ! -e "$app_path/Contents/Resources/THIRD_PARTY_LICENSES" ]] || fail "app still bundles project self-attribution"
 [[ -f "$app_path/Contents/Resources/python.icns" ]] || fail "Python document icon was not generated"
 [[ -f "$app_path/Contents/Resources/AppIcon.icns" ]] || fail "application icon was not generated"
+[[ ! -e "$PROJECT_ROOT/assets/document-base.svg" ]] || fail "custom document base is still present"
+system_document_icon="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericDocumentIcon.icns"
+[[ -f "$system_document_icon" ]] || fail "macOS GenericDocumentIcon.icns is unavailable"
+python_preview="$temp_root/python-icon.png"
+/usr/bin/sips -s format png "$app_path/Contents/Resources/python.icns" --out "$python_preview" >/dev/null
+python_alpha="$(/usr/bin/sips -g hasAlpha "$python_preview" | /usr/bin/sed -n 's/.*hasAlpha: //p')"
+assert_equal "yes" "$python_alpha" "document icon lost its transparent canvas"
+if /usr/bin/grep -q 'M59.2 7H19' "$PROJECT_ROOT/assets/icons/python.svg"; then
+    fail "source filetype glyph still contains the old document silhouette"
+fi
+system_iconset="$temp_root/system-document.iconset"
+python_iconset="$temp_root/python-document.iconset"
+/usr/bin/iconutil -c iconset "$system_document_icon" -o "$system_iconset"
+/usr/bin/iconutil -c iconset "$app_path/Contents/Resources/python.icns" -o "$python_iconset"
+pixel_comparator="$temp_root/compare-icon-region"
+/usr/bin/swiftc -O -framework AppKit -o "$pixel_comparator" - <<'SWIFT'
+import AppKit
+import ImageIO
+
+func normalizedPixels(at path: String) throws -> [UInt8] {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let region = image.cropping(to: CGRect(x: 768, y: 64, width: 128, height: 128)) else {
+        throw CocoaError(.fileReadCorruptFile)
+    }
+    var pixels = [UInt8](repeating: 0, count: 128 * 128 * 4)
+    guard let context = CGContext(
+        data: &pixels,
+        width: 128,
+        height: 128,
+        bitsPerComponent: 8,
+        bytesPerRow: 128 * 4,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else {
+        throw CocoaError(.coderInvalidValue)
+    }
+    context.interpolationQuality = .none
+    context.draw(region, in: CGRect(x: 0, y: 0, width: 128, height: 128))
+    return pixels
+}
+
+guard CommandLine.arguments.count == 3,
+      try normalizedPixels(at: CommandLine.arguments[1]) == normalizedPixels(at: CommandLine.arguments[2]) else {
+    exit(1)
+}
+SWIFT
+if ! "$pixel_comparator" "$system_iconset/icon_512x512@2x.png" \
+    "$python_iconset/icon_512x512@2x.png"; then
+    fail "document icon does not preserve Apple's extracted generic icon"
+fi
 /usr/bin/plutil -lint "$app_path/Contents/Info.plist" >/dev/null
 /usr/bin/plutil -lint "$app_path/Contents/Resources/TerminalBackends.plist" >/dev/null
 /usr/bin/codesign --verify --deep --strict "$app_path"

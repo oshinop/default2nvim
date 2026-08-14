@@ -27,7 +27,9 @@ readonly EXTENSIONS_FILE="$PROJECT_ROOT/resources/extensions.tsv"
 readonly TERMINALS_FILE="$PROJECT_ROOT/resources/terminals.tsv"
 readonly ICONS_DIR="$PROJECT_ROOT/assets/icons"
 readonly APP_ICON="$PROJECT_ROOT/assets/app-icon.svg"
+readonly GENERIC_DOCUMENT_ICON="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericDocumentIcon.icns"
 readonly SWIFT_SOURCE="$PROJECT_ROOT/app/NvimBridge.swift"
+readonly COMPOSITOR_SOURCE="$PROJECT_ROOT/scripts/compose-document-icon.swift"
 readonly LAUNCHER_SOURCE="$PROJECT_ROOT/app/launch-nvim.zsh"
 
 for required_file in \
@@ -35,7 +37,9 @@ for required_file in \
     "$EXTENSIONS_FILE" \
     "$TERMINALS_FILE" \
     "$APP_ICON" \
+    "$GENERIC_DOCUMENT_ICON" \
     "$SWIFT_SOURCE" \
+    "$COMPOSITOR_SOURCE" \
     "$LAUNCHER_SOURCE"; do
     [[ -f "$required_file" ]] || fail "missing required file: $required_file"
 done
@@ -59,6 +63,14 @@ contents="$bundle/Contents"
 macos_dir="$contents/MacOS"
 resources_dir="$contents/Resources"
 /bin/mkdir -p "$macos_dir" "$resources_dir"
+
+# Preserve every size-specific representation Apple ships for the generic
+# document instead of redrawing or downsampling its silhouette.
+generic_document_iconset="$work_root/GenericDocumentIcon.iconset"
+/usr/bin/iconutil -c iconset "$GENERIC_DOCUMENT_ICON" -o "$generic_document_iconset" || \
+    fail "could not extract macOS GenericDocumentIcon.icns"
+[[ -f "$generic_document_iconset/icon_512x512@2x.png" ]] || \
+    fail "macOS generic document icon is missing its 1024-pixel representation"
 
 # Load and validate the shared association catalog.
 typeset -A group_labels group_icons group_extensions seen_extensions required_icons
@@ -89,13 +101,19 @@ for icon in ${(k)required_icons}; do
     [[ -f "$ICONS_DIR/$icon" ]] || fail "missing file icon: assets/icons/$icon"
 done
 
-# Compile the event-aware AppKit wrapper and install its shell launcher.
+# Compile the event-aware app and the build-time document icon compositor.
 "$SWIFTC" \
     -O \
     -whole-module-optimization \
     -framework AppKit \
     -o "$macos_dir/$EXECUTABLE_NAME" \
     "$SWIFT_SOURCE"
+"$SWIFTC" \
+    -O \
+    -whole-module-optimization \
+    -framework AppKit \
+    -o "$work_root/compose-document-icon" \
+    "$COMPOSITOR_SOURCE"
 /bin/chmod 755 "$macos_dir/$EXECUTABLE_NAME"
 /bin/cp "$LAUNCHER_SOURCE" "$resources_dir/launch-nvim.zsh"
 /bin/chmod 755 "$resources_dir/launch-nvim.zsh"
@@ -142,13 +160,12 @@ TERMINAL_FOOTER
 } > "$terminal_plist"
 /usr/bin/plutil -lint "$terminal_plist" >/dev/null
 
-make_icns() {
-    local source_svg="$1"
+make_icns_from_png() {
+    local master="$1"
     local destination="$2"
     local stem="${destination:t:r}"
     local icon_workspace="$work_root/icon-work-$stem"
     local iconset="$icon_workspace/$stem.iconset"
-    local master="$icon_workspace/master.png"
     local specification size filename
     local -a specifications=(
         '16:icon_16x16.png'
@@ -164,7 +181,6 @@ make_icns() {
     )
 
     /bin/mkdir -p "$iconset"
-    /usr/bin/sips -s format png -z 1024 1024 "$source_svg" --out "$master" >/dev/null
     for specification in "${specifications[@]}"; do
         size="${specification%%:*}"
         filename="${specification#*:}"
@@ -173,10 +189,43 @@ make_icns() {
     /usr/bin/iconutil -c icns "$iconset" -o "$destination"
 }
 
-# Generate native macOS icons from the imported SVG file icons.
+make_icns() {
+    local source_svg="$1"
+    local destination="$2"
+    local master="$work_root/${destination:t:r}-master.png"
+    /usr/bin/sips -s format png -z 1024 1024 "$source_svg" --out "$master" >/dev/null
+    make_icns_from_png "$master" "$destination"
+}
+
+make_document_icns() {
+    local glyph_svg="$1"
+    local destination="$2"
+    local stem="${destination:t:r}"
+    local icon_workspace="$work_root/document-icon-$stem"
+    local iconset="$icon_workspace/$stem.iconset"
+    local base_png filename size glyph_size glyph_png
+
+    /bin/mkdir -p "$iconset"
+    for base_png in "$generic_document_iconset"/*.png; do
+        filename="${base_png:t}"
+        size="$(/usr/bin/sips -g pixelWidth "$base_png" | /usr/bin/sed -n 's/.*pixelWidth: //p')"
+        [[ "$size" == <-> ]] || fail "could not read generic document icon size: $filename"
+        glyph_size=$(( (size * 9 + 10) / 20 ))
+        glyph_png="$icon_workspace/${filename%.png}-glyph.png"
+
+        /usr/bin/sips -s format png -z "$glyph_size" "$glyph_size" \
+            "$glyph_svg" --out "$glyph_png" >/dev/null
+        "$work_root/compose-document-icon" "$base_png" "$glyph_png" \
+            "$iconset/$filename" || fail "could not compose document icon: ${glyph_svg:t}"
+    done
+    /usr/bin/iconutil -c icns "$iconset" -o "$destination" || \
+        fail "could not compile document icon: ${glyph_svg:t}"
+}
+
+# Overlay each colored glyph on Apple's extracted macOS generic document icon.
 for icon in ${(ok)required_icons}; do
     icon_stem="${icon%.svg}"
-    make_icns "$ICONS_DIR/$icon" "$resources_dir/$icon_stem.icns"
+    make_document_icns "$ICONS_DIR/$icon" "$resources_dir/$icon_stem.icns"
 done
 make_icns "$APP_ICON" "$resources_dir/AppIcon.icns"
 
